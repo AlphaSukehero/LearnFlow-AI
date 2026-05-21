@@ -3,49 +3,26 @@
 class ContentAnalyzer {
     constructor() {}
 
-    async analyze(text) {
-        // Mocking an AI processing delay
-        return new Promise((resolve) => {
-            setTimeout(() => {
-                resolve({
-                    topic: "Understanding Neural Networks",
-                    difficulty: "Intermediate",
-                    concepts: [
-                        {
-                            name: "Perceptron",
-                            description: "The simplest artificial neuron model.",
-                            why: "To mimic biological neurons mathematically.",
-                            how: "Takes inputs, multiplies by weights, sums them, and passes through an activation function.",
-                            analogy: "Like a committee voting on a decision where some members have more influence (weights).",
-                            related: ["Weights", "Activation Function"]
-                        },
-                        {
-                            name: "Backpropagation",
-                            description: "The algorithm used to train neural networks.",
-                            why: "Networks need a way to learn from errors.",
-                            how: "Calculates the gradient of the loss function backward through the network to update weights.",
-                            analogy: "Like a manager tracing a manufacturing defect backwards through the assembly line to fix the machine.",
-                            related: ["Gradient Descent", "Loss Function"]
-                        },
-                        {
-                            name: "Activation Function",
-                            description: "A mathematical 'gate' in between the input and output of a neuron.",
-                            why: "To introduce non-linearity, allowing the network to learn complex patterns.",
-                            how: "Takes the summed weighted input and outputs a transformed value (e.g., ReLU outputs 0 if negative, otherwise the value itself).",
-                            analogy: "Like a bouncer at a club who only lets you in if you pass a certain threshold of coolness.",
-                            related: ["Perceptron"]
-                        }
-                    ],
-                    misconceptions: [
-                        {
-                            name: "Neural Networks work exactly like the human brain",
-                            why: "They are loosely inspired by the brain, but mathematically very different.",
-                            truth: "They are mathematical optimization engines, not biological replicas."
-                        }
-                    ]
-                });
-            }, 2500);
-        });
+    async analyze(text, url) {
+        try {
+            const response = await fetch('http://localhost:3001/api/analyze', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ text, url })
+            });
+            
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || "Analysis failed");
+            }
+            
+            return await response.json();
+        } catch (err) {
+            console.error("Error analyzing content:", err);
+            throw err;
+        }
     }
 }
 
@@ -125,16 +102,35 @@ class LearnFlowApp {
     }
 
     async handleAnalyze() {
-        // In a real app we'd validate inputs here
+        const urlInput = document.getElementById('youtube-url').value;
+        const textInput = document.getElementById('raw-text').value;
+        const activeTab = document.querySelector('.tab.active').dataset.target;
+        
+        let url = null;
+        let text = null;
+        
+        if (activeTab === 'url') url = urlInput;
+        else text = textInput;
+
+        if (!url && !text) {
+            alert("Please provide a URL or transcript.");
+            return;
+        }
+
         this.switchView('processing');
         
-        // Mock analysis
-        this.state.currentData = await this.analyzer.analyze("mock input");
+        try {
+            this.state.currentData = await this.analyzer.analyze(text, url);
+        } catch (err) {
+            alert(err.message);
+            this.switchView('input');
+            return;
+        }
         
         // Update menu UI
-        this.metaTitle.textContent = this.state.currentData.topic;
-        this.metaDifficulty.textContent = this.state.currentData.difficulty;
-        this.metaConcepts.textContent = `${this.state.currentData.concepts.length} Concepts`;
+        this.metaTitle.textContent = this.state.currentData.topic || "Unknown Topic";
+        this.metaDifficulty.textContent = this.state.currentData.difficulty || "Intermediate";
+        this.metaConcepts.textContent = `${this.state.currentData.concepts?.length || 0} Concepts`;
         
         this.switchView('menu');
     }

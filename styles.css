@@ -254,19 +254,24 @@ h1, h2, h3, h4, h5, h6 {
 .input-group input {
     width: 100%;
     padding: 1.2rem 1.2rem 1.2rem 3rem;
-    background: rgba(0, 0, 0, 0.2);
-    border: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.05);
+    border: 2px solid var(--border-color);
     border-radius: 12px;
     color: var(--text-primary);
-    font-size: 1rem;
+    font-size: 1.1rem;
     font-family: 'Inter', sans-serif;
-    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    transition: all 0.3s ease;
+}
+
+.input-group input::placeholder {
+    color: rgba(255, 255, 255, 0.4);
 }
 
 .input-group input:focus {
     outline: none;
+    background: rgba(255, 255, 255, 0.1);
     border-color: var(--primary-color);
-    box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
+    box-shadow: 0 0 0 4px rgba(139, 92, 246, 0.25);
 }
 
 textarea {
@@ -287,6 +292,40 @@ textarea:focus {
     outline: none;
     border-color: var(--primary-color);
     box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
+}
+
+.file-upload-section {
+    margin-top: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.5rem;
+}
+
+.file-upload-text {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+}
+
+.file-input {
+    font-family: 'Inter', sans-serif;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+}
+
+.file-input::file-selector-button {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid var(--border-color);
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    margin-right: 1rem;
+}
+
+.file-input::file-selector-button:hover {
+    background: rgba(255, 255, 255, 0.15);
 }
 
 .primary-btn {
