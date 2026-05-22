@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LearnFlow AI — Intelligent Learning Assistant</title>
+    <meta name="description" content="Transform educational content into active, personalized learning experiences with AI-powered tutoring.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    
+    <!-- KaTeX for Math Rendering -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="background-elements">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+    </div>
+
+    <div id="app-root">
+        <!-- ═══ HEADER ═══ -->
+        <header class="app-header" id="app-header">
+            <div class="logo">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="url(#g1)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M2 17L12 22L22 17" stroke="url(#g2)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M2 12L12 17L22 12" stroke="url(#g3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    <defs>
+                        <linearGradient id="g1" x1="2" y1="7" x2="22" y2="7" gradientUnits="userSpaceOnUse">
+                            <stop stop-color="#8B5CF6"/><stop offset="1" stop-color="#06B6D4"/>
+                        </linearGradient>
+                        <linearGradient id="g2" x1="2" y1="19.5" x2="22" y2="19.5" gradientUnits="userSpaceOnUse">
+                            <stop stop-color="#8B5CF6"/><stop offset="1" stop-color="#06B6D4"/>
+                        </linearGradient>
+                        <linearGradient id="g3" x1="2" y1="14.5" x2="22" y2="14.5" gradientUnits="userSpaceOnUse">
+                            <stop stop-color="#8B5CF6"/><stop offset="1" stop-color="#06B6D4"/>
+                        </linearGradient>
+                    </defs>
+                </svg>
+                <h1>LearnFlow <span>AI</span></h1>
+            </div>
+            <nav class="header-nav">
+                <div class="status-indicator" id="server-status">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Checking...</span>
+                </div>
+            </nav>
+        </header>
+
+        <!-- ═══ VIEW: INPUT ═══ -->
+        <section id="input-view" class="view active">
+            <div class="hero">
+                <h2>Master any topic<br><span class="gradient-text">in minutes.</span></h2>
+                <p>Paste a YouTube URL or transcript. LearnFlow AI transforms passive content into active learning.</p>
+            </div>
+
+            <div class="input-card glass-panel">
+                <div class="tabs" role="tablist">
+                    <button class="tab active" data-target="url" role="tab" id="tab-url">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22.54 6.42a2.78 2.78 0 0 0-1.94-2C18.88 4 12 4 12 4s-6.88 0-8.6.46a2.78 2.78 0 0 0-1.94 2A29 29 0 0 0 1 11.75a29 29 0 0 0 .46 5.33A2.78 2.78 0 0 0 3.4 19.04c1.72.46 8.6.46 8.6.46s6.88 0 8.6-.46a2.78 2.78 0 0 0 1.94-2 29 29 0 0 0 .46-5.33 29 29 0 0 0-.46-5.33z"></path><polygon points="9.75 15.02 15.5 11.75 9.75 8.48 9.75 15.02"></polygon></svg>
+                        YouTube URL
+                    </button>
+                    <button class="tab" data-target="text" role="tab" id="tab-text">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+                        Text / Transcript
+                    </button>
+                </div>
+
+                <div class="tab-content active" id="url-input-container">
+                    <div class="input-group">
+                        <input type="url" id="youtube-url" placeholder="https://youtube.com/watch?v=..." autocomplete="off">
+                    </div>
+                </div>
+
+                <div class="tab-content" id="text-input-container">
+                    <textarea id="raw-text" placeholder="Paste your transcript, notes, or any educational content here..."></textarea>
+                </div>
+
+                <button id="analyze-btn" class="primary-btn">
+                    <span>Analyze Content</span>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+                </button>
+            </div>
+        </section>
+
+        <!-- ═══ VIEW: PROCESSING ═══ -->
+        <section id="processing-view" class="view">
+            <div class="loader-container">
+                <div class="spinner-ring">
+                    <div class="spinner-core"></div>
+                </div>
+                <h3 id="loading-status">Analyzing content...</h3>
+                <p class="loading-sub">AI is extracting concepts, mapping knowledge, and identifying confusion points.</p>
+            </div>
+        </section>
+
+        <!-- ═══ VIEW: MODE MENU ═══ -->
+        <section id="menu-view" class="view">
+            <div class="menu-container glass-panel">
+                <div class="menu-header">
+                    <div class="topic-meta">
+                        <span class="badge difficulty" id="meta-difficulty">Intermediate</span>
+                        <span class="badge concepts" id="meta-concepts">8 Concepts</span>
+                    </div>
+                    <h2 id="meta-title">Topic Title</h2>
+                    <p class="menu-subtitle">Choose a learning mode to begin your session.</p>
+                </div>
+
+                <div class="modes-grid">
+                    <button class="mode-card" data-mode="1" id="mode-deep-tutor">
+                        <div class="mode-icon deep-tutor">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
+                        </div>
+                        <div class="mode-info">
+                            <h3>[1] Deep Tutor</h3>
+                            <p>Concept-by-concept with analogies &amp; quizzes</p>
+                        </div>
+                        <span class="mode-arrow">→</span>
+                    </button>
+
+                    <button class="mode-card" data-mode="2" id="mode-exam">
+                        <div class="mode-icon exam">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+                        </div>
+                        <div class="mode-info">
+                            <h3>[2] Exam Mode</h3>
+                            <p>Progressive questions: easy → hard</p>
+                        </div>
+                        <span class="mode-arrow">→</span>
+                    </button>
+
+                    <button class="mode-card" data-mode="3" id="mode-notes">
+                        <div class="mode-icon notes">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                        </div>
+                        <div class="mode-info">
+                            <h3>[3] Notes Mode</h3>
+                            <p>Structured notes &amp; flashcards</p>
+                        </div>
+                        <span class="mode-arrow">→</span>
+                    </button>
+
+                    <button class="mode-card" data-mode="4" id="mode-adhd">
+                        <div class="mode-icon adhd">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                        </div>
+                        <div class="mode-info">
+                            <h3>[4] ADHD Mode</h3>
+                            <p>Fast-paced micro-chunks with emojis</p>
+                        </div>
+                        <span class="mode-arrow">→</span>
+                    </button>
+
+                    <button class="mode-card" data-mode="5" id="mode-socratic">
+                        <div class="mode-icon socratic">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                        </div>
+                        <div class="mode-info">
+                            <h3>[5] Socratic Mode</h3>
+                            <p>Discover concepts through guided questions</p>
+                        </div>
+                        <span class="mode-arrow">→</span>
+                    </button>
+
+                    <button class="mode-card" data-mode="6" id="mode-prompt">
+                        <div class="mode-icon prompt">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+                        </div>
+                        <div class="mode-info">
+                            <h3>[6] Prompt Chain</h3>
+                            <p>Copy-paste prompts for any AI tutor</p>
+                        </div>
+                        <span class="mode-arrow">→</span>
+                    </button>
+
+                    <button class="mode-card" data-mode="7" id="mode-weakness">
+                        <div class="mode-icon scan">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                        </div>
+                        <div class="mode-info">
+                            <h3>[7] Weakness Scan</h3>
+                            <p>Find misconceptions before they find you</p>
+                        </div>
+                        <span class="mode-arrow">→</span>
+                    </button>
+
+                    <button class="mode-card mode-card-highlight" data-mode="8" id="mode-summary">
+                        <div class="mode-icon summary">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><line x1="10" y1="9" x2="8" y2="9"></line></svg>
+                        </div>
+                        <div class="mode-info">
+                            <h3>[8] Final Summary</h3>
+                            <p>Complete content summary &amp; key takeaways</p>
+                        </div>
+                        <span class="mode-arrow">→</span>
+                    </button>
+                </div>
+
+                <button class="secondary-btn" id="new-topic-btn">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                    Analyze New Content
+                </button>
+            </div>
+        </section>
+
+        <!-- ═══ VIEW: CHAT ═══ -->
+        <section id="chat-view" class="view">
+            <div class="chat-container glass-panel">
+                <div class="chat-header">
+                    <button id="back-to-menu" class="icon-btn" aria-label="Back to menu">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+                        <span>Menu</span>
+                    </button>
+                    <div class="chat-title">
+                        <span class="active-mode-badge" id="current-mode-badge">Deep Tutor</span>
+                    </div>
+                    <button id="download-pdf-btn" class="icon-btn download-btn" aria-label="Download PDF">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                        <span>PDF</span>
+                    </button>
+                </div>
+
+                <div class="chat-messages" id="chat-messages">
+                    <!-- Messages injected here -->
+                </div>
+
+                <div class="chat-input-area">
+                    <form id="chat-form" autocomplete="off">
+                        <input type="text" id="chat-input" placeholder="Type your response or 'next' to continue..." autocomplete="off">
+                        <button type="submit" class="send-btn" id="send-btn" aria-label="Send message">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
