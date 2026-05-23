@@ -9,12 +9,14 @@
     "dev": "node server.js"
   },
   "dependencies": {
+    "@distube/ytpl": "^1.2.4",
     "@google/genai": "^2.5.0",
     "@google/generative-ai": "^0.24.1",
     "body-parser": "^2.2.2",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "youtube-transcript": "^1.3.1"
+    "youtube-transcript": "^1.3.1",
+    "ytpl": "^2.3.0"
   }
 }

@@ -53,16 +53,77 @@ async function callGemini(prompt, jsonMode = false, retries = 3) {
   }
 }
 
-// ─── Utility: Extract Transcript ─────────────────────────────────────
-async function extractTranscript(url) {
+// ─── Named error classes from youtube-transcript ─────────────────────
+const {
+  YoutubeTranscript,
+  YoutubeTranscriptDisabledError,
+  YoutubeTranscriptVideoUnavailableError,
+  YoutubeTranscriptNotAvailableError,
+  YoutubeTranscriptTooManyRequestError,
+} = require('youtube-transcript');
+
+// ─── Utility: Scrape YouTube Metadata (fallback for no-subtitle videos)
+async function scrapeYouTubeMetadata(videoUrl) {
+  return new Promise((resolve) => {
+    const https = require('https');
+    const opts = {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    };
+    let data = '';
+    const req = https.get(videoUrl, opts, (res) => {
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => {
+        const title    = (data.match(/"title":\{"runs":\[\{"text":"([^"]+)"/) || [])[1] || '';
+        const desc     = (data.match(/"shortDescription":"((?:[^"\\]|\\.){0,1000})/) || [])[1] || '';
+        const keywords = (data.match(/"keywords":\[([^\]]+)\]/) || [])[1] || '';
+        resolve({
+          title: title.trim(),
+          description: desc.replace(/\\n/g, '\n').replace(/\\"/g, '"').trim(),
+          keywords: keywords.replace(/"/g, '').trim(),
+        });
+      });
+    });
+    req.on('error', () => resolve({ title: '', description: '', keywords: '' }));
+    req.setTimeout(8000, () => { req.destroy(); resolve({ title: '', description: '', keywords: '' }); });
+  });
+}
+
+// ─── Utility: Extract Transcript (with metadata fallback) ─────────────
+async function extractTranscript(videoUrl) {
   try {
-    const { YoutubeTranscript } = require('youtube-transcript');
-    const data = await YoutubeTranscript.fetchTranscript(url);
+    const data = await YoutubeTranscript.fetchTranscript(videoUrl);
+    if (!data || data.length === 0) return null;
     return data.map(t => t.text).join(' ');
   } catch (err) {
-    console.warn('YouTube transcript fetch failed:', err.message);
+    // Disabled / unavailable subtitles → try metadata fallback
+    if (
+      err instanceof YoutubeTranscriptDisabledError ||
+      err instanceof YoutubeTranscriptNotAvailableError ||
+      err instanceof YoutubeTranscriptVideoUnavailableError
+    ) {
+      console.warn(`No transcript for ${videoUrl} — trying metadata fallback...`);
+      const meta = await scrapeYouTubeMetadata(videoUrl);
+      if (meta.title) {
+        return `[NO TRANSCRIPT — METADATA ONLY]\nTitle: ${meta.title}\nDescription: ${meta.description}\nKeywords: ${meta.keywords}`;
+      }
+      throw new Error('⚠️ The creator has disabled subtitles for this video, and no metadata could be retrieved. Please paste the content manually.');
+    }
+    if (err instanceof YoutubeTranscriptTooManyRequestError) {
+      throw new Error('⚠️ YouTube is rate-limiting transcript requests. Please wait a few minutes and try again.');
+    }
+    // Generic / network error
+    console.warn('Transcript fetch failed:', err.message);
     return null;
   }
+}
+
+// ─── Utility: Extract video ID from YouTube URL ───────────────────────
+function extractVideoId(url) {
+  const m = url.match(/(?:v=|youtu\.be\/|embed\/|shorts\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
 }
 
 // ─── Utility: Resolve Content ────────────────────────────────────────
@@ -71,11 +132,64 @@ async function resolveContent(body) {
   let content = text || '';
 
   if (url && url.trim()) {
-    const transcript = await extractTranscript(url.trim());
-    if (transcript) {
-      content = transcript;
-    } else if (!content) {
-      throw new Error('Could not extract transcript from the provided YouTube URL. Please paste the transcript manually.');
+    const cleanUrl = url.trim();
+
+    if (cleanUrl.includes('list=')) {
+      // ── PLAYLIST PATH ──────────────────────────────────────────────
+      const ytpl = require('@distube/ytpl');
+      let playlist;
+      try {
+        playlist = await ytpl(cleanUrl, { limit: Infinity });
+      } catch (err) {
+        throw new Error(`Failed to fetch playlist. Make sure it is public and the URL is valid. (${err.message})`);
+      }
+
+      console.log(`📋 Playlist: "${playlist.title}" — ${playlist.items.length} videos`);
+      let fullTranscript = '';
+      let skipped = 0;
+
+      for (const item of playlist.items) {
+        try {
+          // Per-video timeout via Promise.race
+          const t = await Promise.race([
+            extractTranscript(item.shortUrl),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('timeout')), 20000)
+            ),
+          ]);
+          if (t) {
+            fullTranscript += `\n\n--- Video: ${item.title} ---\n${t}`;
+          } else {
+            skipped++;
+          }
+        } catch (e) {
+          console.warn(`Skipping "${item.title}": ${e.message}`);
+          skipped++;
+        }
+      }
+
+      if (!fullTranscript) {
+        throw new Error('Could not extract any transcripts from this playlist. The creator may have disabled subtitles on all videos.');
+      }
+
+      const note = skipped > 0 ? `\n\n[NOTE: ${skipped} video(s) were skipped due to missing transcripts]` : '';
+      content = fullTranscript + note;
+
+    } else {
+      // ── SINGLE VIDEO PATH ──────────────────────────────────────────
+      let transcript;
+      try {
+        transcript = await extractTranscript(cleanUrl);
+      } catch (err) {
+        // Re-throw user-friendly errors directly
+        throw err;
+      }
+
+      if (transcript) {
+        content = transcript;
+      } else if (!content) {
+        throw new Error('Could not extract transcript from this YouTube URL. Try pasting the transcript manually in the "Text / Transcript" tab.');
+      }
     }
   }
 
@@ -83,8 +197,8 @@ async function resolveContent(body) {
     throw new Error('Please provide a YouTube URL or paste text content (at least 10 characters).');
   }
 
-  // Cap at 30k characters to stay within token limits
-  return content.substring(0, 30000);
+  // Cap at 8 million characters to handle entire large playlists
+  return content.substring(0, 8000000);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -94,28 +208,42 @@ app.post('/api/analyze', async (req, res) => {
   try {
     const content = await resolveContent(req.body);
 
-    const prompt = `You are an expert educational AI analyst. Analyze the following content thoroughly.
+    const isMetadataOnly = content.startsWith('[NO TRANSCRIPT — METADATA ONLY]');
+
+    const prompt = `You are a highly versatile AI content analyst. Analyze the following content thoroughly.
+
+${isMetadataOnly ? `NOTE: No transcript was available for this video. The content below is metadata only (title, description, keywords). Analyze and extract as much meaning as possible from this metadata — infer the song/video topic, genre, style, likely themes, and any other relevant information you can determine.` : ''}
+
+First, identify the Content Type (e.g., Educational Tutorial, Music Video, Podcast, Vlog, Story, Documentary, News, Entertainment).
 
 Extract:
-- The main topic title (concise, 3-8 words)
-- Difficulty level: "Beginner", "Intermediate", or "Advanced"
-- Key concepts (5-10 concepts minimum)
-- Common misconceptions students have about this topic
+- The main topic/title (concise, 3-8 words)
+- Difficulty/Vibe: If educational, "Beginner/Intermediate/Advanced". If music, describe the genre and emotional vibe (e.g., "Soulful Telugu Melody", "Upbeat Pop"). If other, describe appropriately.
+- Key Details (5-10 minimum):
+  • If Educational → "Key Concepts" with explanations
+  • If Music → "Song Themes", "Lyrical Meanings", "Musical Style", "Artist Background"
+  • If Podcast/Talk → "Key Talking Points", "Arguments Made"
+  • If Story/Vlog → "Plot Points", "Key Moments"
+  • Adapt labels to fit the actual content type.
+- Interesting Facts or Misconceptions (5 minimum):
+  • If Educational → "Common Misconceptions"
+  • If Music → "Fun Facts", "Hidden Meanings", "Common Misinterpretations of lyrics"
+  • If other → relevant facts or surprising aspects
 
-For each concept provide:
-- name: short concept name
+For each Key Detail provide:
+- name: short name
 - description: 2-3 sentence explanation
-- why: why this concept matters / exists
-- how: how it works mechanically
-- analogy: a vivid real-world analogy
-- related: array of 2-3 related concept names
+- why: why it matters or the deeper meaning
+- how: how it works or how it is expressed in the content
+- analogy: a real-world analogy or cultural reference
+- related: array of 2-3 related details
 
-For each misconception provide:
-- name: the misconception statement
-- why: why students believe this
-- truth: the correct understanding
+For each Fact/Misconception provide:
+- name: the statement
+- why: why people believe it or why it is interesting
+- truth: the reality or deeper truth
 
-Respond ONLY with a valid JSON object:
+Respond ONLY with a valid JSON object (do not change key names — keep "concepts" and "misconceptions" as keys):
 {
   "topic": "string",
   "difficulty": "string",
@@ -127,7 +255,34 @@ Content to analyze:
 ${content}`;
 
     const result = await callGemini(prompt, true);
-    const parsed = JSON.parse(result);
+    let parsed;
+    try {
+      // Try direct parse first (jsonMode should give clean JSON)
+      parsed = JSON.parse(result);
+    } catch (e) {
+      // Strip markdown fences if present
+      let clean = result.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim();
+      // Extract first top-level JSON object using brace matching
+      let depth = 0, start = -1, end = -1;
+      for (let i = 0; i < clean.length; i++) {
+        if (clean[i] === '{') { if (depth === 0) start = i; depth++; }
+        else if (clean[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+      }
+      if (start !== -1 && end !== -1) {
+        try { parsed = JSON.parse(clean.slice(start, end + 1)); }
+        catch (e2) {
+          console.error('JSON parse failed even after extraction:', e2.message);
+          console.error('Raw result (first 500):', result.substring(0, 500));
+          throw new Error('AI returned malformed JSON. Please try again.');
+        }
+      } else {
+        throw new Error('AI returned malformed JSON. Please try again.');
+      }
+    }
+    // Validate shape
+    if (!parsed.topic || !Array.isArray(parsed.concepts)) {
+      throw new Error('AI response was missing required fields. Please try again.');
+    }
     res.json(parsed);
   } catch (error) {
     console.error('Analyze Error:', error.message);
