@@ -1,6 +1,6 @@
 /**
- * LearnFlow AI — Frontend Application v2.0
- * All 7 modes powered by real Gemini AI backend
+ * LearnFlow AI — Frontend Application v2.1
+ * All 8 modes powered by real Gemini AI backend with streaming
  */
 
 const API_BASE = window.location.origin;
@@ -164,19 +164,84 @@ class LearnFlowApp {
     this.switchView('processing');
     this.loadingStatus.textContent = 'Analyzing content...';
 
-    try {
-      const res = await fetch(`${API_BASE}/api/analyze`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, text }),
-      });
+    // Reset progress bar
+    const progressWrap = document.getElementById('playlist-progress-wrap');
+    const progressBar  = document.getElementById('playlist-progress-bar');
+    const progressCount = document.getElementById('playlist-progress-count');
+    const progressLabel = document.getElementById('playlist-progress-label');
+    const progressVideo = document.getElementById('playlist-current-video');
+    const loadingSub    = document.getElementById('loading-sub');
+    progressWrap.style.display = 'none';
+    progressBar.style.width = '0%';
 
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Analysis failed');
+    try {
+      let analysisData;
+
+      if (url && url.includes('list=')) {
+        // ── PLAYLIST: use SSE for real-time progress ──────────────────
+        analysisData = await new Promise((resolve, reject) => {
+          progressWrap.style.display = 'block';
+          loadingSub.textContent = 'Fetching playlist info...';
+
+          const evtSource = new EventSource(`${API_BASE}/api/analyze-progress?url=${encodeURIComponent(url)}`);
+
+          evtSource.onmessage = (e) => {
+            const msg = JSON.parse(e.data);
+
+            if (msg.type === 'cached') {
+              evtSource.close();
+              this.showToast('⚡ Loaded from cache (instant!)');
+              resolve(msg.result);
+            } else if (msg.type === 'playlist') {
+              this.loadingStatus.textContent = `📋 "${msg.title}"`;
+              loadingSub.textContent = `Processing ${msg.total} videos...`;
+              progressCount.textContent = `0 / ${msg.total}`;
+            } else if (msg.type === 'progress') {
+              const pct = Math.round((msg.current / msg.total) * 100);
+              progressBar.style.width = `${pct}%`;
+              progressCount.textContent = `${msg.current} / ${msg.total}`;
+              progressLabel.textContent = `Fetching transcripts...`;
+              progressVideo.textContent = `▶ ${msg.title}`;
+            } else if (msg.type === 'analyzing') {
+              progressBar.style.width = '100%';
+              this.loadingStatus.textContent = 'Running AI analysis...';
+              loadingSub.textContent = 'Almost done — extracting key insights from the playlist...';
+              progressVideo.textContent = '';
+            } else if (msg.type === 'done') {
+              evtSource.close();
+              resolve(msg.result);
+            } else if (msg.type === 'error') {
+              evtSource.close();
+              reject(new Error(msg.message));
+            }
+          };
+
+          evtSource.onerror = () => {
+            evtSource.close();
+            reject(new Error('Connection to server lost during playlist processing.'));
+          };
+        });
+
+      } else {
+        // ── SINGLE VIDEO / TEXT: fast POST ───────────────────────────
+        loadingSub.textContent = 'AI is extracting concepts, mapping knowledge, and identifying confusion points.';
+        const res = await fetch(`${API_BASE}/api/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, text }),
+        });
+
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || 'Analysis failed');
+        }
+
+        const data = await res.json();
+        if (data._cached) this.showToast('⚡ Loaded from cache (instant!)');
+        analysisData = data;
       }
 
-      this.state.analysisData = await res.json();
+      this.state.analysisData = analysisData;
 
       // Update menu UI
       this.metaTitle.textContent = this.state.analysisData.topic || 'Unknown Topic';
@@ -232,23 +297,101 @@ class LearnFlowApp {
     this.sendToAI(text);
   }
 
-  // ─── Send to Backend AI ───────────────────────────────────────────
+  // ─── Send to Backend AI (Streaming) ───────────────────────────────
   async sendToAI(userMessage) {
     this.state.isProcessing = true;
     this.setSendEnabled(false);
     this.showTypingIndicator();
 
     try {
+      const payload = {
+        mode: this.state.currentMode,
+        analysisData: this.state.analysisData,
+        userMessage: userMessage,
+        conversationHistory: this.state.conversationHistory,
+        conceptIndex: this.state.conceptIndex,
+      };
+
+      // Try streaming first
+      const res = await fetch(`${API_BASE}/api/chat/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      this.removeTypingIndicator();
+
+      if (!res.ok || !res.body) {
+        // Fallback to non-streaming
+        return await this.sendToAIFallback(userMessage, payload);
+      }
+
+      // Create the message container immediately and scroll to its TOP
+      const { div, contentEl, rawTextRef } = this.createStreamingMessage();
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let fullText = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const msg = JSON.parse(line.slice(6));
+            if (msg.type === 'chunk') {
+              fullText += msg.text;
+              contentEl.innerHTML = renderMarkdown(fullText);
+              this.renderMath(contentEl);
+              // Keep scrolling to bottom as content streams in
+              this.scrollToBottom();
+            } else if (msg.type === 'error') {
+              fullText = `⚠️ **Error:** ${msg.message}\n\nPlease try again or type 'menu' to go back.`;
+              contentEl.innerHTML = renderMarkdown(fullText);
+            }
+          } catch (_) {}
+        }
+      }
+
+      // Update raw text reference for copy button
+      rawTextRef.text = fullText;
+
+      // Track conversation
+      if (userMessage) {
+        this.state.conversationHistory.push({ role: 'user', content: userMessage });
+      }
+      if (fullText) {
+        this.state.conversationHistory.push({ role: 'assistant', content: fullText });
+      }
+
+      // Scroll to TOP of the AI message so user reads from the beginning
+      this.scrollToMessageTop(div);
+
+    } catch (err) {
+      this.removeTypingIndicator();
+      this.addSystemMessage(`⚠️ **Error:** ${err.message}\n\nPlease try again or type 'menu' to go back.`);
+    } finally {
+      this.state.isProcessing = false;
+      this.setSendEnabled(true);
+      this.chatInput.focus();
+    }
+  }
+
+  // ─── Non-streaming fallback ───────────────────────────────────────
+  async sendToAIFallback(userMessage, payload) {
+    this.showTypingIndicator();
+    try {
       const res = await fetch(`${API_BASE}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mode: this.state.currentMode,
-          analysisData: this.state.analysisData,
-          userMessage: userMessage,
-          conversationHistory: this.state.conversationHistory,
-          conceptIndex: this.state.conceptIndex,
-        }),
+        body: JSON.stringify(payload),
       });
 
       this.removeTypingIndicator();
@@ -260,13 +403,14 @@ class LearnFlowApp {
 
       const data = await res.json();
 
-      // Track conversation history
       if (userMessage) {
         this.state.conversationHistory.push({ role: 'user', content: userMessage });
       }
       this.state.conversationHistory.push({ role: 'assistant', content: data.response });
 
-      this.addSystemMessage(data.response);
+      const msgDiv = this.addSystemMessage(data.response);
+      // Scroll to TOP of the message so user reads from beginning
+      this.scrollToMessageTop(msgDiv);
     } catch (err) {
       this.removeTypingIndicator();
       this.addSystemMessage(`⚠️ **Error:** ${err.message}\n\nPlease try again or type 'menu' to go back.`);
@@ -278,6 +422,24 @@ class LearnFlowApp {
   }
 
   // ─── UI Helpers ───────────────────────────────────────────────────
+  createStreamingMessage() {
+    const div = document.createElement('div');
+    div.className = 'message system';
+    const rawTextRef = { text: '' };
+    div.innerHTML = `<div class="message-content"><p></p></div>
+      <div class="msg-actions">
+        <button class="copy-btn" aria-label="Copy message">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+          <span>Copy</span>
+        </button>
+      </div>`;
+    const copyBtn = div.querySelector('.copy-btn');
+    copyBtn.addEventListener('click', () => this.copyMessageText(copyBtn, rawTextRef.text));
+    this.chatMessages.appendChild(div);
+    const contentEl = div.querySelector('.message-content');
+    return { div, contentEl, rawTextRef };
+  }
+
   addSystemMessage(text) {
     const div = document.createElement('div');
     div.className = 'message system';
@@ -295,6 +457,7 @@ class LearnFlowApp {
     this.chatMessages.appendChild(div);
     this.renderMath(div);
     this.scrollToBottom();
+    return div;
   }
 
   renderMath(element) {
@@ -345,6 +508,19 @@ class LearnFlowApp {
     });
   }
 
+  // Scroll so the TOP of a message div is visible (not the bottom)
+  scrollToMessageTop(msgDiv) {
+    if (!msgDiv) return;
+    requestAnimationFrame(() => {
+      // Scroll the chat container so this message's top is visible
+      const containerRect = this.chatMessages.getBoundingClientRect();
+      const msgRect = msgDiv.getBoundingClientRect();
+      const scrollOffset = msgRect.top - containerRect.top + this.chatMessages.scrollTop;
+      // Add a small offset so the message isn't flush with the very top
+      this.chatMessages.scrollTo({ top: scrollOffset - 12, behavior: 'smooth' });
+    });
+  }
+
   escapeHtml(text) {
     const d = document.createElement('div');
     d.textContent = text;
@@ -352,8 +528,16 @@ class LearnFlowApp {
   }
 
   showToast(message) {
-    // Simple alert fallback
-    alert(message);
+    // Create a proper toast instead of alert
+    const toast = document.createElement('div');
+    toast.className = 'toast-notification';
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add('show'));
+    setTimeout(() => {
+      toast.classList.remove('show');
+      setTimeout(() => toast.remove(), 300);
+    }, 4000);
   }
 
   copyMessageText(btn, rawText) {
@@ -425,8 +609,8 @@ class LearnFlowApp {
         @media print { body { padding: 20px; } .msg { break-inside: avoid; } }
       </style>
       <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-      <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-      <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+      <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"><\/script>
+      <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"><\/script>
       <script>
         window.onload = function() {
           if(window.renderMathInElement) {
@@ -442,7 +626,7 @@ class LearnFlowApp {
           }
           setTimeout(function(){ window.print(); }, 500);
         };
-      </script>
+      <\/script>
       </head><body>
       <h1>${this.escapeHtml(modeName)}</h1>
       <div class="meta">Topic: ${this.escapeHtml(topic)} &nbsp;|&nbsp; ${new Date().toLocaleString()}</div>`);

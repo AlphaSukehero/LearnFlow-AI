@@ -3,22 +3,38 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const { GoogleGenAI } = require('@google/genai');
+const cache = require('./cache');
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ─── Gemini AI Client ────────────────────────────────────────────────
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-if (!GEMINI_API_KEY) {
-  console.error('⚠ GEMINI_API_KEY not set in .env — AI features will not work.');
+// ─── Gemini AI Client (Dual-Key Rotation) ────────────────────────────
+const API_KEYS = [
+  process.env.GEMINI_API_KEY_1,
+  process.env.GEMINI_API_KEY_2,
+  process.env.GEMINI_API_KEY, // legacy fallback
+].filter(Boolean);
+
+if (API_KEYS.length === 0) {
+  console.error('⚠ No GEMINI_API_KEY set in .env — AI features will not work.');
 }
-const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-const MODEL = 'gemini-3.5-flash';
+let currentKeyIndex = 0;
+function getAI() {
+  const key = API_KEYS[currentKeyIndex % API_KEYS.length];
+  return new GoogleGenAI({ apiKey: key });
+}
+function rotateKey() {
+  if (API_KEYS.length > 1) {
+    currentKeyIndex = (currentKeyIndex + 1) % API_KEYS.length;
+    console.log(`[key-rotate] Switched to API key #${currentKeyIndex + 1}`);
+  }
+}
+const MODEL = 'gemini-2.5-flash';
 
 // ─── Utility: Call Gemini (with retry for rate limits) ───────────────
-async function callGemini(prompt, jsonMode = false, retries = 3) {
+async function callGemini(prompt, jsonMode = false, retries = 4) {
   const config = {};
   if (jsonMode) {
     config.responseMimeType = 'application/json';
@@ -26,6 +42,7 @@ async function callGemini(prompt, jsonMode = false, retries = 3) {
 
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
+      const ai = getAI();
       const response = await ai.models.generateContent({
         model: MODEL,
         contents: prompt,
@@ -38,18 +55,56 @@ async function callGemini(prompt, jsonMode = false, retries = 3) {
         (err?.message && err.message.includes('RESOURCE_EXHAUSTED')) ||
         (err?.message && err.message.includes('quota'));
 
-      if (isRateLimit && attempt < retries - 1) {
-        const waitSec = Math.pow(2, attempt + 1) * 2; // 4s, 8s, 16s
-        console.warn(`Rate limited, retrying in ${waitSec}s (attempt ${attempt + 1}/${retries})...`);
-        await new Promise(r => setTimeout(r, waitSec * 1000));
-        continue;
+      if (isRateLimit) {
+        rotateKey(); // switch to next API key
+        if (attempt < retries - 1) {
+          const waitSec = Math.pow(2, attempt + 1) * 2;
+          console.warn(`[callGemini] Attempt ${attempt+1} rate-limited, rotating key & retrying in ${waitSec}s...`);
+          await new Promise(r => setTimeout(r, waitSec * 1000));
+          continue;
+        }
+        throw new Error('AI rate limit reached on all keys. Please wait a minute and try again.');
       }
 
-      if (isRateLimit) {
-        throw new Error('AI rate limit reached. Please wait a minute and try again.');
-      }
-      throw err;
+      // Parse ugly API errors into clean messages
+      let cleanMsg = err.message || 'Unknown AI error';
+      try {
+        const parsed = JSON.parse(cleanMsg);
+        if (parsed?.error?.message) cleanMsg = parsed.error.message;
+      } catch (_) {}
+      console.error(`[callGemini] Error (attempt ${attempt+1}):`, cleanMsg);
+      throw new Error(`AI error: ${cleanMsg}`);
     }
+  }
+}
+
+// ─── Utility: Call Gemini with streaming (for chat) ──────────────────
+async function callGeminiStream(prompt, onChunk) {
+  const ai = getAI();
+  try {
+    const response = await ai.models.generateContentStream({
+      model: MODEL,
+      contents: prompt,
+      config: {}
+    });
+    let full = '';
+    for await (const chunk of response) {
+      const text = chunk.text || '';
+      if (text) {
+        full += text;
+        onChunk(text);
+      }
+    }
+    return full;
+  } catch (err) {
+    const isRateLimit = err?.status === 429 ||
+      (err?.message && err.message.includes('429')) ||
+      (err?.message && err.message.includes('RESOURCE_EXHAUSTED'));
+    if (isRateLimit) {
+      rotateKey();
+      throw new Error('AI rate limit reached. Please wait a moment and try again.');
+    }
+    throw err;
   }
 }
 
@@ -150,13 +205,14 @@ async function resolveContent(body) {
 
       for (const item of playlist.items) {
         try {
-          // Per-video timeout via Promise.race
+          // Per-video timeout via Promise.race (with cleanup)
+          let timer;
           const t = await Promise.race([
             extractTranscript(item.shortUrl),
-            new Promise((_, reject) =>
-              setTimeout(() => reject(new Error('timeout')), 20000)
-            ),
-          ]);
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error('timeout')), 20000);
+            }),
+          ]).finally(() => clearTimeout(timer));
           if (t) {
             fullTranscript += `\n\n--- Video: ${item.title} ---\n${t}`;
           } else {
@@ -202,48 +258,130 @@ async function resolveContent(body) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  ENDPOINT 1: /api/analyze — Content analysis (topic extraction)
+//  ENDPOINT 1a: /api/analyze-progress — SSE stream for playlist progress
 // ═══════════════════════════════════════════════════════════════════════
-app.post('/api/analyze', async (req, res) => {
+app.get('/api/analyze-progress', async (req, res) => {
+  // Server-Sent Events setup
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+
   try {
-    const content = await resolveContent(req.body);
+    const url = req.query.url;
+    if (!url || !url.includes('list=')) {
+      send({ type: 'error', message: 'Not a playlist URL.' });
+      return res.end();
+    }
+
+    // Check cache first
+    const cached = cache.get({ url });
+    if (cached) {
+      send({ type: 'cached', result: cached });
+      return res.end();
+    }
+
+    const ytpl = require('@distube/ytpl');
+    let playlist;
+    try {
+      playlist = await ytpl(url.trim(), { limit: Infinity });
+    } catch (err) {
+      send({ type: 'error', message: `Failed to fetch playlist: ${err.message}` });
+      return res.end();
+    }
+
+    const total = playlist.items.length;
+    send({ type: 'playlist', title: playlist.title, total });
+
+    let fullTranscript = '';
+    let skipped = 0;
+
+    for (let i = 0; i < playlist.items.length; i++) {
+      const item = playlist.items[i];
+      send({ type: 'progress', current: i + 1, total, title: item.title });
+
+      try {
+        let timer;
+        const t = await Promise.race([
+          extractTranscript(item.shortUrl),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('timeout')), 20000);
+          }),
+        ]).finally(() => clearTimeout(timer));
+        if (t) {
+          fullTranscript += `\n\n--- Video: ${item.title} ---\n${t}`;
+        } else { skipped++; }
+      } catch (e) {
+        console.warn(`[SSE] Skipping "${item.title}": ${e.message}`);
+        skipped++;
+      }
+    }
+
+    if (!fullTranscript) {
+      send({ type: 'error', message: 'No transcripts found in playlist — subtitles may be disabled on all videos.' });
+      return res.end();
+    }
+
+    const note = skipped > 0 ? `\n\n[NOTE: ${skipped} video(s) skipped — no subtitles]` : '';
+    const content = (fullTranscript + note).substring(0, 8000000);
+
+    send({ type: 'analyzing', message: 'Fetching done — running AI analysis...' });
 
     const isMetadataOnly = content.startsWith('[NO TRANSCRIPT — METADATA ONLY]');
+    const parsed = await runAnalysis(content, isMetadataOnly);
 
-    const prompt = `You are a highly versatile AI content analyst. Analyze the following content thoroughly.
+    // Save to cache
+    cache.set({ url }, parsed);
+    send({ type: 'done', result: parsed });
+  } catch (err) {
+    send({ type: 'error', message: err.message });
+  }
+  res.end();
+});
 
-${isMetadataOnly ? `NOTE: No transcript was available for this video. The content below is metadata only (title, description, keywords). Analyze and extract as much meaning as possible from this metadata — infer the song/video topic, genre, style, likely themes, and any other relevant information you can determine.` : ''}
+// ─── Shared AI analysis logic (used by both endpoints) ───────────────
+async function runAnalysis(content, isMetadataOnly) {
+  const contentWords = content.split(/\s+/).length;
+  const minConcepts = Math.min(Math.max(10, Math.floor(contentWords / 300)), 40);
+  const minMisconceptions = Math.min(Math.max(5, Math.floor(contentWords / 600)), 20);
 
-First, identify the Content Type (e.g., Educational Tutorial, Music Video, Podcast, Vlog, Story, Documentary, News, Entertainment).
+  const prompt = `You are a world-class AI content analyst with perfect recall. Your job is to analyze the COMPLETE content below — read EVERY part of it from start to finish before producing output.
 
-Extract:
-- The main topic/title (concise, 3-8 words)
-- Difficulty/Vibe: If educational, "Beginner/Intermediate/Advanced". If music, describe the genre and emotional vibe (e.g., "Soulful Telugu Melody", "Upbeat Pop"). If other, describe appropriately.
-- Key Details (5-10 minimum):
-  • If Educational → "Key Concepts" with explanations
-  • If Music → "Song Themes", "Lyrical Meanings", "Musical Style", "Artist Background"
-  • If Podcast/Talk → "Key Talking Points", "Arguments Made"
-  • If Story/Vlog → "Plot Points", "Key Moments"
-  • Adapt labels to fit the actual content type.
-- Interesting Facts or Misconceptions (5 minimum):
-  • If Educational → "Common Misconceptions"
-  • If Music → "Fun Facts", "Hidden Meanings", "Common Misinterpretations of lyrics"
-  • If other → relevant facts or surprising aspects
+${isMetadataOnly ? `NOTE: No transcript was available. The content below is metadata only. Extract as much meaning as possible from it.` : `CRITICAL INSTRUCTION: The content below spans MULTIPLE VIDEOS or a very long lecture. You MUST scan from the very beginning to the very end. Do NOT stop at the first few topics. Cover ALL sections, chapters, and topics that appear throughout — early, middle, AND late portions equally.`}
 
-For each Key Detail provide:
-- name: short name
-- description: 2-3 sentence explanation
-- why: why it matters or the deeper meaning
-- how: how it works or how it is expressed in the content
-- analogy: a real-world analogy or cultural reference
-- related: array of 2-3 related details
+Step 1 — Identify:
+- Content Type (e.g., Educational Tutorial, Music Video, Podcast, Vlog, Documentary, News, Entertainment)
+- Main topic/title (concise, 5-10 words)
+- Difficulty/Vibe: Educational → Beginner/Intermediate/Advanced. Music → genre + emotional vibe. Other → describe appropriately.
 
-For each Fact/Misconception provide:
-- name: the statement
+Step 2 — Extract ALL Key Concepts/Topics (MINIMUM ${minConcepts} — more is better for long content):
+You MUST identify and cover concepts from EVERY PART of the content — beginning, middle, and end.
+  • If Educational: every major concept, formula, definition, sub-topic taught
+  • If Music: lyrical themes, song structure, musical style, artist background, cultural context
+  • If Podcast/Talk: every argument, talking point, story, case study covered
+  • Do NOT stop early. Each sub-topic should be its own concept entry.
+
+For each concept provide:
+- name: concise name of the concept/topic/section
+- description: 2-3 sentence explanation of what it is
+- why: why it matters or its deeper significance
+- how: how it works / how it is explained or demonstrated in the content
+- analogy: a vivid real-world analogy or cultural reference
+- related: array of 2-3 other concepts from this content it connects to
+
+Step 3 — Extract Misconceptions / Fun Facts (MINIMUM ${minMisconceptions}):
+  • Educational → common student misconceptions, tricky exam traps
+  • Music → hidden meanings, commonly misheard lyrics, fun facts
+  • Other → surprising, counterintuitive, or commonly misunderstood aspects
+
+For each misconception/fact provide:
+- name: the misconception or fact statement
 - why: why people believe it or why it is interesting
-- truth: the reality or deeper truth
+- truth: the correct understanding or deeper truth
 
-Respond ONLY with a valid JSON object (do not change key names — keep "concepts" and "misconceptions" as keys):
+Respond ONLY with a valid JSON object. Keep key names exactly as shown:
 {
   "topic": "string",
   "difficulty": "string",
@@ -251,38 +389,106 @@ Respond ONLY with a valid JSON object (do not change key names — keep "concept
   "misconceptions": [{"name":"","why":"","truth":""}]
 }
 
-Content to analyze:
+FULL CONTENT TO ANALYZE (read all of it):
 ${content}`;
 
-    const result = await callGemini(prompt, true);
-    let parsed;
-    try {
-      // Try direct parse first (jsonMode should give clean JSON)
-      parsed = JSON.parse(result);
-    } catch (e) {
-      // Strip markdown fences if present
-      let clean = result.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim();
-      // Extract first top-level JSON object using brace matching
-      let depth = 0, start = -1, end = -1;
-      for (let i = 0; i < clean.length; i++) {
-        if (clean[i] === '{') { if (depth === 0) start = i; depth++; }
-        else if (clean[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
-      }
-      if (start !== -1 && end !== -1) {
-        try { parsed = JSON.parse(clean.slice(start, end + 1)); }
-        catch (e2) {
-          console.error('JSON parse failed even after extraction:', e2.message);
-          console.error('Raw result (first 500):', result.substring(0, 500));
-          throw new Error('AI returned malformed JSON. Please try again.');
-        }
-      } else {
-        throw new Error('AI returned malformed JSON. Please try again.');
-      }
+
+
+  const result = await callGemini(prompt, true);
+  let parsed;
+  try {
+    parsed = JSON.parse(result);
+  } catch (e) {
+    let clean = result.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim();
+    let depth = 0, start = -1, end = -1;
+    for (let i = 0; i < clean.length; i++) {
+      if (clean[i] === '{') { if (depth === 0) start = i; depth++; }
+      else if (clean[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
     }
-    // Validate shape
-    if (!parsed.topic || !Array.isArray(parsed.concepts)) {
-      throw new Error('AI response was missing required fields. Please try again.');
+    if (start !== -1 && end !== -1) {
+      try { parsed = JSON.parse(clean.slice(start, end + 1)); }
+      catch (e2) { throw new Error('AI returned malformed JSON. Please try again.'); }
+    } else {
+      throw new Error('AI returned malformed JSON. Please try again.');
     }
+  }
+  if (!parsed.topic || !Array.isArray(parsed.concepts)) {
+    throw new Error('AI response was missing required fields. Please try again.');
+  }
+  return parsed;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  ENDPOINT 1: /api/analyze — Content analysis (topic extraction)
+// ═══════════════════════════════════════════════════════════════════════
+app.post('/api/analyze', async (req, res) => {
+  try {
+    // ── Cache check ──────────────────────────────────────────────────
+    const cached = cache.get(req.body);
+    if (cached) {
+      console.log('[cache] HIT —', req.body.url || '(text input)');
+      return res.json({ ...cached, _cached: true });
+    }
+
+    const content = await resolveContent(req.body);
+
+    const isMetadataOnly = content.startsWith('[NO TRANSCRIPT — METADATA ONLY]');
+
+    // Scale concept count to content size (more content = more concepts extracted)
+    const contentWords = content.split(/\s+/).length;
+    const minConcepts = Math.min(Math.max(10, Math.floor(contentWords / 300)), 40);
+    const minMisconceptions = Math.min(Math.max(5, Math.floor(contentWords / 600)), 20);
+
+    const prompt = `You are a world-class AI content analyst with perfect recall. Your job is to analyze the COMPLETE content below — read EVERY part of it from start to finish before producing output.
+
+${isMetadataOnly ? `NOTE: No transcript was available for this video. The content below is metadata only (title, description, keywords). Analyze and extract as much meaning as possible from this metadata.` : `CRITICAL INSTRUCTION: The content below spans the ENTIRE video/lecture. You MUST scan from the very beginning to the very end. Do NOT stop at the first few topics. Cover ALL sections, chapters, and topics that appear throughout the content — early, middle, AND late portions equally.`}
+
+Step 1 — Identify:
+- Content Type (e.g., Educational Tutorial, Music Video, Podcast, Vlog, Documentary, News, Entertainment)
+- Main topic/title (concise, 5-10 words)
+- Difficulty/Vibe: Educational → Beginner/Intermediate/Advanced. Music → genre + emotional vibe (e.g., "Soulful Telugu Melody"). Other → describe appropriately.
+
+Step 2 — Extract ALL Key Concepts/Topics (MINIMUM ${minConcepts} — more is better for long content):
+You MUST identify and cover concepts from EVERY PART of the content — beginning, middle, and end.
+  • If Educational: every major concept, formula, definition, sub-topic taught
+  • If Music: lyrical themes, song structure, musical style, artist background, cultural context
+  • If Podcast/Talk: every argument, talking point, story, case study covered
+  • If Story/Vlog: every major plot point, scene, theme covered
+  • Do NOT stop early. If you see sub-topics in the content, each should be its own concept.
+
+For each concept provide:
+- name: concise name of the concept/topic/section
+- description: 2-3 sentence explanation of what it is
+- why: why it matters or its deeper significance
+- how: how it works / how it is explained or demonstrated in the content
+- analogy: a vivid real-world analogy or cultural reference
+- related: array of 2-3 other concepts from this content it connects to
+
+Step 3 — Extract Misconceptions / Fun Facts (MINIMUM ${minMisconceptions}):
+  • Educational → common student misconceptions, tricky exam traps
+  • Music → hidden meanings, commonly misheard lyrics, fun facts
+  • Other → surprising, counterintuitive, or commonly misunderstood aspects
+
+For each misconception/fact provide:
+- name: the misconception or fact statement
+- why: why people believe it or why it is interesting
+- truth: the correct understanding or deeper truth
+
+Respond ONLY with a valid JSON object. Keep key names exactly as shown:
+{
+  "topic": "string",
+  "difficulty": "string",
+  "concepts": [{"name":"","description":"","why":"","how":"","analogy":"","related":[]}],
+  "misconceptions": [{"name":"","why":"","truth":""}]
+}
+
+FULL CONTENT TO ANALYZE (read all of it):
+${content}`;
+
+
+    const parsed = await runAnalysis(content, isMetadataOnly);
+    // ── Save to cache and respond ────────────────────────────────────
+    cache.set(req.body, parsed);
     res.json(parsed);
   } catch (error) {
     console.error('Analyze Error:', error.message);
@@ -292,7 +498,66 @@ ${content}`;
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-//  ENDPOINT 2: /api/chat — Universal chat for ALL modes
+//  ENDPOINT 2: /api/chat/stream — SSE streaming chat for ALL modes
+// ═══════════════════════════════════════════════════════════════════════
+app.post('/api/chat/stream', async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  try {
+    const { mode, analysisData, userMessage, conversationHistory, conceptIndex } = req.body;
+
+    if (!analysisData || !mode) {
+      res.write(`data: ${JSON.stringify({ type: 'error', message: 'Missing mode or analysis data.' })}\n\n`);
+      return res.end();
+    }
+
+    const topicContext = `
+TOPIC: ${analysisData.topic}
+DIFFICULTY: ${analysisData.difficulty}
+CONCEPTS: ${JSON.stringify(analysisData.concepts.map(c => c.name))}
+FULL CONCEPT DATA: ${JSON.stringify(analysisData.concepts)}
+MISCONCEPTIONS: ${JSON.stringify(analysisData.misconceptions)}
+`;
+
+    const historyText = (conversationHistory || [])
+      .slice(-10)
+      .map(m => `${m.role === 'user' ? 'Student' : 'Tutor'}: ${m.content}`)
+      .join('\n');
+
+    let systemPrompt = '';
+    switch (mode) {
+      case 1: systemPrompt = buildDeepTutorPrompt(topicContext, analysisData, conceptIndex, userMessage); break;
+      case 2: systemPrompt = buildExamModePrompt(topicContext, analysisData, userMessage); break;
+      case 3: systemPrompt = buildNotesModePrompt(topicContext, analysisData, userMessage); break;
+      case 4: systemPrompt = buildADHDModePrompt(topicContext, analysisData, conceptIndex, userMessage); break;
+      case 5: systemPrompt = buildSocraticModePrompt(topicContext, analysisData, userMessage); break;
+      case 6: systemPrompt = buildPromptChainPrompt(topicContext, analysisData, userMessage); break;
+      case 7: systemPrompt = buildWeaknessScanPrompt(topicContext, analysisData, userMessage); break;
+      case 8: systemPrompt = buildFinalSummaryPrompt(topicContext, analysisData, userMessage); break;
+      default:
+        res.write(`data: ${JSON.stringify({ type: 'error', message: `Unknown mode: ${mode}` })}\n\n`);
+        return res.end();
+    }
+
+    const fullPrompt = `${systemPrompt}\n\nPrevious conversation:\n${historyText || '(This is the start of the conversation)'}\n\nStudent's message: ${userMessage || '(Session just started — give your opening message)'}`;
+
+    await callGeminiStream(fullPrompt, (chunk) => {
+      res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`);
+    });
+
+    res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+  } catch (error) {
+    console.error('Chat Stream Error:', error.message);
+    res.write(`data: ${JSON.stringify({ type: 'error', message: error.message })}\n\n`);
+  }
+  res.end();
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+//  ENDPOINT 2b: /api/chat — Non-streaming fallback
 // ═══════════════════════════════════════════════════════════════════════
 app.post('/api/chat', async (req, res) => {
   try {
@@ -310,49 +575,25 @@ FULL CONCEPT DATA: ${JSON.stringify(analysisData.concepts)}
 MISCONCEPTIONS: ${JSON.stringify(analysisData.misconceptions)}
 `;
 
-    // Build conversation context from history
     const historyText = (conversationHistory || [])
-      .slice(-10) // keep last 10 messages for context
+      .slice(-10)
       .map(m => `${m.role === 'user' ? 'Student' : 'Tutor'}: ${m.content}`)
       .join('\n');
 
     let systemPrompt = '';
-
     switch (mode) {
-      case 1: // Deep Tutor
-        systemPrompt = buildDeepTutorPrompt(topicContext, analysisData, conceptIndex, userMessage);
-        break;
-      case 2: // Exam Mode
-        systemPrompt = buildExamModePrompt(topicContext, analysisData, userMessage);
-        break;
-      case 3: // Notes Mode
-        systemPrompt = buildNotesModePrompt(topicContext, analysisData, userMessage);
-        break;
-      case 4: // ADHD Mode
-        systemPrompt = buildADHDModePrompt(topicContext, analysisData, conceptIndex, userMessage);
-        break;
-      case 5: // Socratic Mode
-        systemPrompt = buildSocraticModePrompt(topicContext, analysisData, userMessage);
-        break;
-      case 6: // Prompt Chain
-        systemPrompt = buildPromptChainPrompt(topicContext, analysisData, userMessage);
-        break;
-      case 7: // Weakness Scan
-        systemPrompt = buildWeaknessScanPrompt(topicContext, analysisData, userMessage);
-        break;
-      case 8: // Final Summary
-        systemPrompt = buildFinalSummaryPrompt(topicContext, analysisData, userMessage);
-        break;
-      default:
-        return res.status(400).json({ error: `Unknown mode: ${mode}` });
+      case 1: systemPrompt = buildDeepTutorPrompt(topicContext, analysisData, conceptIndex, userMessage); break;
+      case 2: systemPrompt = buildExamModePrompt(topicContext, analysisData, userMessage); break;
+      case 3: systemPrompt = buildNotesModePrompt(topicContext, analysisData, userMessage); break;
+      case 4: systemPrompt = buildADHDModePrompt(topicContext, analysisData, conceptIndex, userMessage); break;
+      case 5: systemPrompt = buildSocraticModePrompt(topicContext, analysisData, userMessage); break;
+      case 6: systemPrompt = buildPromptChainPrompt(topicContext, analysisData, userMessage); break;
+      case 7: systemPrompt = buildWeaknessScanPrompt(topicContext, analysisData, userMessage); break;
+      case 8: systemPrompt = buildFinalSummaryPrompt(topicContext, analysisData, userMessage); break;
+      default: return res.status(400).json({ error: `Unknown mode: ${mode}` });
     }
 
-    const fullPrompt = `${systemPrompt}
-
-Previous conversation:
-${historyText || '(This is the start of the conversation)'}
-
-Student's message: ${userMessage || '(Session just started — give your opening message)'}`;
+    const fullPrompt = `${systemPrompt}\n\nPrevious conversation:\n${historyText || '(This is the start of the conversation)'}\n\nStudent's message: ${userMessage || '(Session just started — give your opening message)'}`;
 
     const result = await callGemini(fullPrompt);
     res.json({ response: result });
@@ -624,8 +865,9 @@ RULES:
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    version: '2.0.0',
-    ai: GEMINI_API_KEY ? 'connected' : 'no-key',
+    version: '2.1.0',
+    ai: API_KEYS.length > 0 ? 'connected' : 'no-key',
+    keys: API_KEYS.length,
     timestamp: new Date().toISOString()
   });
 });
@@ -639,8 +881,8 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`\n  ╔══════════════════════════════════════╗`);
-  console.log(`  ║   LearnFlow AI Server v2.0.0         ║`);
+  console.log(`  ║   LearnFlow AI Server v2.1.0         ║`);
   console.log(`  ║   Running on http://localhost:${PORT}   ║`);
-  console.log(`  ║   AI: ${GEMINI_API_KEY ? '✅ Gemini Connected' : '❌ No API Key'}         ║`);
+  console.log(`  ║   AI: ${API_KEYS.length > 0 ? `✅ ${API_KEYS.length} Key(s) Loaded` : '❌ No API Key'}       ║`);
   console.log(`  ╚══════════════════════════════════════╝\n`);
 });
